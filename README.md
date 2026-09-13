@@ -46,6 +46,8 @@ ros2 run roscco roscco_node --ros-args -p can_channel:=0
 | выход | `throttle_report` | `roscco/msg/ThrottleReport` |
 | выход | `fault_report` | `roscco/msg/FaultReport` |
 | выход | `can_frame` | `roscco/msg/CanFrame` |
+| выход | `steering_angle` | `roscco/msg/SteeringAngleReport` |
+| выход | `brake_pedal` | `roscco/msg/BrakePedalReport` |
 
 Ручная проверка:
 
@@ -54,6 +56,83 @@ ros2 topic hz /brake_report
 ros2 topic echo /fault_report
 ros2 topic pub --once /enable_disable roscco/msg/EnableDisable '{enable_control: true}'
 ```
+
+## Параметры
+
+Все параметры объявлены с дескрипторами и диапазонами, так что rclcpp отклоняет
+мусор и при старте, и при каждом `ros2 param set`. Посмотреть границы:
+
+```bash
+ros2 param describe /roscco_node limits.throttle_max
+ros2 param list /roscco_node
+```
+
+### Ограничения команд
+
+| Параметр | Диапазон | По умолчанию |
+|---|---|---|
+| `limits.brake_min` / `limits.brake_max` | 0…1 | 0 / 1 |
+| `limits.throttle_min` / `limits.throttle_max` | 0…1 | 0 / 1 |
+| `limits.steering_torque_min` | −1…0 | −1 |
+| `limits.steering_torque_max` | 0…1 | 1 |
+
+Входящие команды клампятся перед уходом в OSCC, факт обрезки логируется
+(throttled, раз в секунду). `NaN`/`inf` заменяются нулём — во firmware улетает
+float, и NaN там хуже нуля.
+
+Это не косметика: прошивка принимает полный диапазон, и кроме этих клампов
+между кривым выходом планировщика и полной тягой ничего нет. В
+`example.launch.py` по умолчанию стоят осторожные 0.30 тормоза / 0.15 газа /
+±0.25 руля — поднимай по мере доверия к стеку.
+
+`roscco_teleop` имеет собственные `max_brake`, `max_throttle`,
+`max_steering_torque` — они масштабируют вход геймпада ещё до публикации.
+
+### Обратная связь: угол руля и педаль тормоза
+
+Декодируется из OBD-кадров, которые CAN gateway перекладывает на control CAN.
+**Без модуля gateway на шине кадров нет, и оба топика молчат** — это ожидаемо.
+
+Сигнал описывается как в DBC, все поля — параметры:
+
+| Параметр | Смысл |
+|---|---|
+| `*.enabled` | включить декодирование |
+| `*.can_id` | идентификатор кадра (0…0x1FFFFFFF) |
+| `*.start_bit` | Intel — позиция LSB, Motorola — позиция MSB |
+| `*.bit_length` | ширина в битах (1…64) |
+| `*.little_endian` | true = Intel, false = Motorola (пилообразная нумерация как в DBC) |
+| `*.is_signed` | дополнительный код |
+| `*.scale`, `*.offset` | `физ = raw * scale + offset` |
+
+Префиксы — `steering_feedback.` и `brake_pedal_feedback.`.
+
+Дополнительно у руля `min_angle` / `max_angle`: выход за них не глушит
+сообщение, а ставит `in_range=false` и пишет warning — так неверный
+scale или порядок байт виден сразу, а не превращается в тишину.
+
+У тормоза `bit_length: 1` читает педальный выключатель. Если у тебя вместо
+выключателя аналог (давление, положение), поставь реальную ширину и порог
+`press_threshold`; `active_high: false` инвертирует смысл.
+
+`feedback_timeout` (по умолчанию 1 с) — через сколько молчания по настроенному
+ID писать предупреждение.
+
+Дефолты `0x2B0` (угол, 0.1°/LSB) и `0x220` (тормоз) взяты из
+`oscc/firmware/vehicles/kia_soul/vehicles.h`. **Для любой другой машины они
+неверны** — придётся реверсить самому, `cansniffer` в помощь.
+
+Подбор на живой машине:
+
+```bash
+ros2 topic echo /steering_angle
+ros2 param set /roscco_node steering_feedback.scale 0.0625
+ros2 param set /roscco_node steering_feedback.little_endian false
+```
+
+Параметры сигнала читаются на каждый кадр, так что крутить их можно не
+перезапуская узел. `enabled` и проверка «влезает ли сигнал в 8 байт» —
+только на старте.
 
 ## Что изменилось не только синтаксически
 

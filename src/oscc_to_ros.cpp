@@ -1,6 +1,7 @@
 #include "roscco/oscc_to_ros.hpp"
 
 #include <chrono>
+#include <memory>
 
 namespace roscco
 {
@@ -90,6 +91,8 @@ OsccToRos::OsccToRos(rclcpp::Node * node, int drain_period_ms)
   if (sigprocmask(SIG_SETMASK, &orig_mask, nullptr) < 0) {
     RCLCPP_ERROR(node_->get_logger(), "Failed to unblock SIGIO");
   }
+
+  feedback_ = std::make_unique<ObdFeedback>(node_);
 
   drain_timer_ = node_->create_wall_timer(
     std::chrono::milliseconds(drain_period_ms),
@@ -200,8 +203,13 @@ void OsccToRos::drain()
         out.frame.data[i] = item.data.data[i];
       }
       obd_pub_->publish(out);
+
+      // Raw frame goes out regardless; the decoder picks out the IDs it wants.
+      feedback_->process(item.data, out.header.stamp);
     }
   }
+
+  feedback_->checkStaleness(node_->get_clock()->now());
 
   const std::uint64_t drops = dropped_.load(std::memory_order_relaxed);
   if (drops != last_reported_drops_) {

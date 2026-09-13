@@ -44,6 +44,7 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   msg/BrakeCommand.msg
+  msg/BrakePedalReport.msg
   msg/BrakeReport.msg
   msg/BrakeReportData.msg
   msg/CanFrame.msg
@@ -52,6 +53,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/FaultOriginId.msg
   msg/FaultReport.msg
   msg/FaultReportData.msg
+  msg/SteeringAngleReport.msg
   msg/SteeringCommand.msg
   msg/SteeringReport.msg
   msg/SteeringReportData.msg
@@ -71,6 +73,7 @@ rosidl_get_typesupport_target(cpp_typesupport_target
 add_library(roscco_bridge SHARED
   src/ros_to_oscc.cpp
   src/oscc_to_ros.cpp
+  src/obd_feedback.cpp
 )
 target_include_directories(roscco_bridge PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -90,6 +93,8 @@ install(TARGETS roscco_node
 
 if(BUILD_EXAMPLES)
   add_executable(roscco_teleop example/roscco_teleop.cpp)
+  target_include_directories(roscco_teleop PRIVATE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
   ament_target_dependencies(roscco_teleop rclcpp sensor_msgs)
   target_link_libraries(roscco_teleop "${cpp_typesupport_target}")
   install(TARGETS roscco_teleop

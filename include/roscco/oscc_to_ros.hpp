@@ -2,6 +2,7 @@
 #define ROSCCO__OSCC_TO_ROS_HPP_
 
 #include <atomic>
+#include <memory>
 #include <csignal>
 #include <cstdint>
 
@@ -10,6 +11,8 @@ extern "C" {
 }
 
 #include <rclcpp/rclcpp.hpp>
+
+#include "roscco/obd_feedback.hpp"
 
 #include "roscco/msg/brake_report.hpp"
 #include "roscco/msg/can_frame.hpp"
@@ -64,6 +67,9 @@ private:
   rclcpp::Publisher<msg::CanFrame>::SharedPtr obd_pub_;
 
   rclcpp::TimerBase::SharedPtr drain_timer_;
+
+  /// Decodes steering angle / brake pedal out of the forwarded OBD frames.
+  std::unique_ptr<ObdFeedback> feedback_;
 
   // Depth 64 at 50 Hz per module is over a second of slack.
   static SignalQueue<Stamped<oscc_brake_report_s>, 64> brake_queue_;

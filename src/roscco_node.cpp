@@ -7,6 +7,7 @@ extern "C" {
 #include <rclcpp/rclcpp.hpp>
 
 #include "roscco/oscc_to_ros.hpp"
+#include "roscco/parameter_utils.hpp"
 #include "roscco/ros_to_oscc.hpp"
 
 int main(int argc, char * argv[])
@@ -15,8 +16,13 @@ int main(int argc, char * argv[])
 
   auto node = std::make_shared<rclcpp::Node>("roscco_node");
 
-  const int can_channel = node->declare_parameter<int>("can_channel", 0);
-  const int drain_period_ms = node->declare_parameter<int>("drain_period_ms", 5);
+  const int can_channel = static_cast<int>(roscco::declareInt(
+    node.get(), "can_channel", 0, 0, 15,
+    "SocketCAN channel index: 0 means can0."));
+  const int drain_period_ms = static_cast<int>(roscco::declareInt(
+    node.get(), "drain_period_ms", 5, 1, 100,
+    "How often queued OSCC reports are published, in milliseconds. Reports "
+    "arrive at 50 Hz per module, so 5 ms adds negligible latency."));
 
   // NOTE: older OSCC API revisions expose oscc_init() with no arguments
   // instead of oscc_open(channel). If your checkout of the oscc submodule

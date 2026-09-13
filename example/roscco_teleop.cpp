@@ -6,6 +6,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 
+#include "roscco/parameter_utils.hpp"
+
 #include "roscco/msg/brake_command.hpp"
 #include "roscco/msg/enable_disable.hpp"
 #include "roscco/msg/steering_command.hpp"
@@ -47,15 +49,38 @@ public:
   RosccoTeleop()
   : Node("roscco_teleop")
   {
-    brake_axis_ = declare_parameter<int>("brake_axis", 2);
-    throttle_axis_ = declare_parameter<int>("throttle_axis", 5);
-    steering_axis_ = declare_parameter<int>("steering_axis", 0);
-    start_button_ = declare_parameter<int>("start_button", 7);
-    back_button_ = declare_parameter<int>("back_button", 6);
+    using roscco::declareDouble;
+    using roscco::declareInt;
 
-    smoothing_factor_ = declare_parameter<double>("steering_smoothing_factor", 0.1);
-    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 50.0);
-    joy_timeout_s_ = declare_parameter<double>("joy_timeout", 0.3);
+    brake_axis_ = static_cast<int>(declareInt(
+      this, "brake_axis", 2, 0, 31, "Joy axis index for the brake trigger."));
+    throttle_axis_ = static_cast<int>(declareInt(
+      this, "throttle_axis", 5, 0, 31, "Joy axis index for the throttle trigger."));
+    steering_axis_ = static_cast<int>(declareInt(
+      this, "steering_axis", 0, 0, 31, "Joy axis index for the steering stick."));
+    start_button_ = static_cast<int>(declareInt(
+      this, "start_button", 7, 0, 31, "Joy button index that enables control."));
+    back_button_ = static_cast<int>(declareInt(
+      this, "back_button", 6, 0, 31, "Joy button index that disables control."));
+
+    smoothing_factor_ = declareDouble(
+      this, "steering_smoothing_factor", 0.1, 0.01, 1.0,
+      "Exponential-average coefficient. 1.0 disables smoothing.");
+    publish_rate_hz_ = declareDouble(
+      this, "publish_rate_hz", 50.0, 5.0, 200.0,
+      "Command publish rate. Must stay above 5 Hz: the OSCC modules fault out "
+      "after 200 ms without a command.");
+    joy_timeout_s_ = declareDouble(
+      this, "joy_timeout", 0.3, 0.05, 5.0,
+      "Seconds without a joy message before commands are zeroed and control "
+      "is disabled.");
+
+    max_brake_ = declareDouble(
+      this, "max_brake", 1.0, 0.0, 1.0, "Scales the brake trigger output.");
+    max_throttle_ = declareDouble(
+      this, "max_throttle", 1.0, 0.0, 1.0, "Scales the throttle trigger output.");
+    max_steering_ = declareDouble(
+      this, "max_steering_torque", 1.0, 0.0, 1.0, "Scales the steering stick output.");
 
     const rclcpp::QoS qos(10);
 
@@ -114,9 +139,12 @@ private:
     }
 
     // Triggers: [1, -1] -> [0, 1]. Steering stick: [1, -1] -> [-1, 1].
-    brake_ = linearTransform(joy->axes[brake_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
-    throttle_ = linearTransform(joy->axes[throttle_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
-    steering_ = linearTransform(joy->axes[steering_axis_], kStickMax, kStickMin, 1.0, -1.0);
+    brake_ = max_brake_ *
+      linearTransform(joy->axes[brake_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
+    throttle_ = max_throttle_ *
+      linearTransform(joy->axes[throttle_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
+    steering_ = max_steering_ *
+      linearTransform(joy->axes[steering_axis_], kStickMax, kStickMin, 1.0, -1.0);
 
     if (previous_back_ == 0 && joy->buttons[back_button_]) {
       setEnabled(false);
@@ -200,6 +228,9 @@ private:
   double smoothing_factor_{0.1};
   double publish_rate_hz_{50.0};
   double joy_timeout_s_{0.3};
+  double max_brake_{1.0};
+  double max_throttle_{1.0};
+  double max_steering_{1.0};
 
   double brake_{0.0};
   double throttle_{0.0};

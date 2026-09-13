@@ -1,3 +1,4 @@
+# made by Opus 5 
 # roscco (ROS 2 Humble)
 
 Порт `PolySync/roscco` с ROS 1 (catkin) на ROS 2 Humble (ament_cmake).

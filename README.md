@@ -7,8 +7,8 @@
 
 ```bash
 mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
-# положить сюда каталог roscco/
-cd roscco
+# положить сюда каталог roscco-humble/
+cd roscco-humble
 git submodule add https://github.com/PolySync/oscc.git oscc   # или скопировать вручную
 git submodule update --init oscc
 

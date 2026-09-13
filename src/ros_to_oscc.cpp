@@ -1,6 +1,12 @@
-#include <roscco/ros_to_oscc.h>
+#include "roscco/ros_to_oscc.hpp"
 
-RosToOscc::RosToOscc(ros::NodeHandle* public_nh, ros::NodeHandle* private_nh)
+#include <functional>
+
+namespace roscco
+{
+
+RosToOscc::RosToOscc(rclcpp::Node * node)
+: node_(node)
 {
   sigset_t mask;
   sigset_t orig_mask;
@@ -9,91 +15,71 @@ RosToOscc::RosToOscc(ros::NodeHandle* public_nh, ros::NodeHandle* private_nh)
   sigemptyset(&orig_mask);
   sigaddset(&mask, SIGIO);
 
-  // Temporary block of OSCC SIGIO while initializing ROS publication to prevent
-  // signal conflicts
-  if (sigprocmask(SIG_BLOCK, &mask, &orig_mask) < 0)
-  {
-    ROS_ERROR("Failed to block SIGIO");
+  // Block OSCC's SIGIO while the subscriptions are being built.
+  if (sigprocmask(SIG_BLOCK, &mask, &orig_mask) < 0) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to block SIGIO");
   }
 
-  topic_brake_command_ =
-      public_nh->subscribe<roscco::BrakeCommand>("brake_command", 10, &RosToOscc::brakeCommandCallback, this);
+  const rclcpp::QoS qos(10);
 
-  topic_steering_command_ =
-      public_nh->subscribe<roscco::SteeringCommand>("steering_command", 10, &RosToOscc::steeringCommandCallback, this);
+  brake_sub_ = node_->create_subscription<msg::BrakeCommand>(
+    "brake_command", qos,
+    std::bind(&RosToOscc::brakeCommandCallback, this, std::placeholders::_1));
 
-  topic_throttle_command_ =
-      public_nh->subscribe<roscco::ThrottleCommand>("throttle_command", 10, &RosToOscc::throttleCommandCallback, this);
+  steering_sub_ = node_->create_subscription<msg::SteeringCommand>(
+    "steering_command", qos,
+    std::bind(&RosToOscc::steeringCommandCallback, this, std::placeholders::_1));
 
-  topic_enable_disable_command_ =
-      public_nh->subscribe<roscco::EnableDisable>("enable_disable", 10, &RosToOscc::enableDisableCallback, this);
+  throttle_sub_ = node_->create_subscription<msg::ThrottleCommand>(
+    "throttle_command", qos,
+    std::bind(&RosToOscc::throttleCommandCallback, this, std::placeholders::_1));
 
-  if (sigprocmask(SIG_SETMASK, &orig_mask, NULL) < 0)
-  {
-    ROS_ERROR("Failed to unblock SIGIO");
-  }
-};
+  enable_disable_sub_ = node_->create_subscription<msg::EnableDisable>(
+    "enable_disable", qos,
+    std::bind(&RosToOscc::enableDisableCallback, this, std::placeholders::_1));
 
-void RosToOscc::brakeCommandCallback(const roscco::BrakeCommand::ConstPtr& msg)
-{
-  oscc_result_t ret = OSCC_ERROR;
-
-  ret = oscc_publish_brake_position(msg->brake_position);
-
-  if (ret == OSCC_ERROR)
-  {
-    ROS_ERROR("OSCC_ERROR occured while trying send the brake position.");
-  }
-  else if (ret == OSCC_WARNING)
-  {
-    ROS_WARN("OSCC_WARNING occured while trying send the brake position.");
-  }
-};
-
-void RosToOscc::steeringCommandCallback(const roscco::SteeringCommand::ConstPtr& msg)
-{
-  oscc_result_t ret = OSCC_ERROR;
-
-  ret = oscc_publish_steering_torque(msg->steering_torque);
-
-  if (ret == OSCC_ERROR)
-  {
-    ROS_ERROR("OSCC_ERROR occured while trying send the steering torque.");
-  }
-  else if (ret == OSCC_WARNING)
-  {
-    ROS_WARN("OSCC_WARNING occured while trying send the steering torque.");
-  }
-};
-
-void RosToOscc::throttleCommandCallback(const roscco::ThrottleCommand::ConstPtr& msg)
-{
-  oscc_result_t ret = OSCC_ERROR;
-
-  ret = oscc_publish_throttle_position(msg->throttle_position);
-
-  if (ret == OSCC_ERROR)
-  {
-    ROS_ERROR("OSCC_ERROR occured while trying send the throttle position.");
-  }
-  else if (ret == OSCC_WARNING)
-  {
-    ROS_WARN("OSCC_WARNING occured while trying send the throttle position.");
-  }
-};
-
-void RosToOscc::enableDisableCallback(const roscco::EnableDisable::ConstPtr& msg)
-{
-  oscc_result_t ret = OSCC_ERROR;
-
-  ret = msg->enable_control ? oscc_enable() : oscc_disable();
-
-  if (ret == OSCC_ERROR)
-  {
-    ROS_ERROR("OSCC_ERROR occured while trying to enable or disable control.");
-  }
-  else if (ret == OSCC_WARNING)
-  {
-    ROS_WARN("OSCC_WARNING occured while trying to enable or disable control.");
+  if (sigprocmask(SIG_SETMASK, &orig_mask, nullptr) < 0) {
+    RCLCPP_ERROR(node_->get_logger(), "Failed to unblock SIGIO");
   }
 }
+
+bool RosToOscc::report(oscc_result_t result, const char * action)
+{
+  if (result == OSCC_ERROR) {
+    RCLCPP_ERROR(node_->get_logger(), "OSCC_ERROR while trying to %s", action);
+    return false;
+  }
+
+  if (result == OSCC_WARNING) {
+    RCLCPP_WARN(node_->get_logger(), "OSCC_WARNING while trying to %s", action);
+    return false;
+  }
+
+  return true;
+}
+
+void RosToOscc::brakeCommandCallback(const msg::BrakeCommand::SharedPtr message)
+{
+  report(oscc_publish_brake_position(message->brake_position), "send the brake position");
+}
+
+void RosToOscc::steeringCommandCallback(const msg::SteeringCommand::SharedPtr message)
+{
+  report(oscc_publish_steering_torque(message->steering_torque), "send the steering torque");
+}
+
+void RosToOscc::throttleCommandCallback(const msg::ThrottleCommand::SharedPtr message)
+{
+  report(oscc_publish_throttle_position(message->throttle_position), "send the throttle position");
+}
+
+void RosToOscc::enableDisableCallback(const msg::EnableDisable::SharedPtr message)
+{
+  const bool enable = message->enable_control;
+
+  if (report(enable ? oscc_enable() : oscc_disable(), "enable or disable control")) {
+    RCLCPP_INFO(node_->get_logger(), "OSCC control %s", enable ? "ENABLED" : "disabled");
+  }
+}
+
+}  // namespace roscco

@@ -1,325 +1,124 @@
-cmake_minimum_required(VERSION 2.8.3)
+cmake_minimum_required(VERSION 3.8)
 project(roscco)
 
-## Compile as C++11, supported in ROS Kinetic and newer
-## C++11 is required for rapidcheck
-if (CMAKE_VERSION VERSION_LESS "3.1")
-  if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set (CMAKE_CXX_FLAGS "-std=gnu++11 ${CMAKE_CXX_FLAGS}")
-  endif ()
-else ()
-  set (CMAKE_CXX_STANDARD 11)
-endif ()
+if(NOT CMAKE_C_STANDARD)
+  set(CMAKE_C_STANDARD 99)
+endif()
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+endif()
 
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+option(BUILD_EXAMPLES "Build the teleop example node" ON)
+
+# ---------------------------------------------------------------------------
+# OSCC API (git submodule at ./oscc)
+# ---------------------------------------------------------------------------
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/oscc/api/src/oscc.c")
+  message(FATAL_ERROR
+    "OSCC submodule not found. Run:\n"
+    "  git submodule update --init oscc\n"
+    "from the package root.")
+endif()
+
+# Sets the vehicle-specific compile definitions from -DKIA_SOUL=ON etc.
 include(oscc/api/OsccConfig.cmake)
 
-find_package(catkin REQUIRED COMPONENTS
-  message_generation
-  roscpp
-  std_msgs
+add_library(oscc_api STATIC oscc/api/src/oscc.c)
+set_target_properties(oscc_api PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(oscc_api PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/oscc/api/include>
+  $<INSTALL_INTERFACE:include>)
+
+# ---------------------------------------------------------------------------
+# ROS 2 dependencies
+# ---------------------------------------------------------------------------
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
+
+rosidl_generate_interfaces(${PROJECT_NAME}
+  msg/BrakeCommand.msg
+  msg/BrakeReport.msg
+  msg/BrakeReportData.msg
+  msg/CanFrame.msg
+  msg/CanFrameData.msg
+  msg/EnableDisable.msg
+  msg/FaultOriginId.msg
+  msg/FaultReport.msg
+  msg/FaultReportData.msg
+  msg/SteeringCommand.msg
+  msg/SteeringReport.msg
+  msg/SteeringReportData.msg
+  msg/ThrottleCommand.msg
+  msg/ThrottleReport.msg
+  msg/ThrottleReportData.msg
+  DEPENDENCIES std_msgs
 )
 
-################################################
-## Declare ROS messages, services and actions ##
-################################################
+# Link generated C++ types back into targets in this same package.
+rosidl_get_typesupport_target(cpp_typesupport_target
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-add_message_files(
-   FILES
-   BrakeCommand.msg
-   BrakeReport.msg
-   BrakeReportData.msg
-   CanFrame.msg
-   CanFrameData.msg
-   EnableDisable.msg
-   FaultReport.msg
-   FaultReportData.msg
-   SteeringCommand.msg
-   SteeringReport.msg
-   SteeringReportData.msg
-   ThrottleCommand.msg
-   ThrottleReport.msg
-   ThrottleReportData.msg
-)
-
-generate_messages(
-  DEPENDENCIES
-  std_msgs
-)
-
-
-###################################
-## catkin specific configuration ##
-###################################
-catkin_package(
-  LIBRARIES oscc_api ${PROJECT_NAME}_ros_to_oscc ${PROJECT_NAME}_oscc_to_ros
-  CATKIN_DEPENDS message_runtime roscpp std_msgs
-)
-
-###########
-## Build ##
-###########
-
-include_directories(${catkin_INCLUDE_DIRS})
-
-add_library(
-  oscc_api
-  oscc/api/src/oscc.c
-)
-
-target_include_directories(
-  oscc_api PUBLIC
-  include
-  oscc/api/include
-)
-
-add_library(
-  ${PROJECT_NAME}_ros_to_oscc
+# ---------------------------------------------------------------------------
+# Bridge libraries
+# ---------------------------------------------------------------------------
+add_library(roscco_bridge SHARED
   src/ros_to_oscc.cpp
-)
-
-target_include_directories(
-  ${PROJECT_NAME}_ros_to_oscc PUBLIC
-  include
-  oscc/api/include
-  ${catkin_INCLUDE_DIRS}
-)
-
-add_library(
-  ${PROJECT_NAME}_oscc_to_ros
   src/oscc_to_ros.cpp
 )
+target_include_directories(roscco_bridge PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+ament_target_dependencies(roscco_bridge rclcpp std_msgs)
+target_link_libraries(roscco_bridge oscc_api "${cpp_typesupport_target}")
 
-target_include_directories(
-  ${PROJECT_NAME}_oscc_to_ros PUBLIC
-  include
-  oscc/api/include
-)
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+add_executable(roscco_node src/roscco_node.cpp)
+ament_target_dependencies(roscco_node rclcpp)
+target_link_libraries(roscco_node roscco_bridge oscc_api "${cpp_typesupport_target}")
 
-target_link_libraries(
-  ${PROJECT_NAME}_oscc_to_ros
-  oscc_api
-)
+install(TARGETS roscco_node
+  DESTINATION lib/${PROJECT_NAME})
 
-target_link_libraries(
-  ${PROJECT_NAME}_ros_to_oscc
-  oscc_api
-)
-
-add_dependencies(
-  ${PROJECT_NAME}_ros_to_oscc
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-
-add_dependencies(
-  ${PROJECT_NAME}_oscc_to_ros
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-
-add_executable(${PROJECT_NAME}_node src/${PROJECT_NAME}_node.cpp)
-
-target_include_directories(
-  ${PROJECT_NAME}_node PUBLIC
-  include
-  oscc/api/include
-)
-
-add_dependencies(
-  ${PROJECT_NAME}_node
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-
-## Specify libraries to link a library or executable target against
-target_link_libraries(${PROJECT_NAME}_node
-  oscc_api
-  ${PROJECT_NAME}_ros_to_oscc
-  ${PROJECT_NAME}_oscc_to_ros
-  ${catkin_LIBRARIES}
-)
-
-if(EXAMPLE)
-
-add_executable(
-  ${PROJECT_NAME}_teleop
-  example/${PROJECT_NAME}_teleop.cpp
-)
-
-target_include_directories(
-  ${PROJECT_NAME}_teleop PUBLIC
-  include
-)
-
-add_dependencies(
-  ${PROJECT_NAME}_teleop
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-)
-
-target_link_libraries(
-  ${PROJECT_NAME}_teleop
-  ${catkin_LIBRARIES}
-)
-
+if(BUILD_EXAMPLES)
+  add_executable(roscco_teleop example/roscco_teleop.cpp)
+  ament_target_dependencies(roscco_teleop rclcpp sensor_msgs)
+  target_link_libraries(roscco_teleop "${cpp_typesupport_target}")
+  install(TARGETS roscco_teleop
+    DESTINATION lib/${PROJECT_NAME})
 endif()
 
-if(APOLLO AND (KIA_SOUL_EV OR KIA_NIRO))
+install(TARGETS roscco_bridge oscc_api
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin)
 
-find_package(catkin 
-             REQUIRED COMPONENTS 
-             roscpp 
-             rospy 
-             std_msgs 
-             genmsg)
+install(DIRECTORY include/
+  DESTINATION include)
 
-include_directories(include
-    ${catkin_INCLUDE_DIRS}
-    /apollo/bazel-apollo/bazel-out/local-dbg/genfiles/
-)
+install(DIRECTORY oscc/api/include/
+  DESTINATION include
+  FILES_MATCHING PATTERN "*.h")
 
-add_library(
-  ${PROJECT_NAME}_pid_control
-  src/pid_control.cpp
-)
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME})
 
-
-link_directories(
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/canbus/
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/control/
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/common/proto
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/drivers/canbus/common/
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/drivers/canbus/proto/
-    /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/drivers/canbus/ )    
-
-add_executable(
-  ${PROJECT_NAME}_apollo
-  example/${PROJECT_NAME}_apollo.cpp
-)
-
-target_include_directories(
-  ${PROJECT_NAME}_apollo PUBLIC
-  include
-  oscc/api/include
-)
-
-add_dependencies(
-  ${PROJECT_NAME}_apollo
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-  ${PROJECT_NAME}_apollo_generate_messages_cpp
-)
-
-target_link_libraries(
-  ${PROJECT_NAME}_apollo
-  ${catkin_LIBRARIES}
-  ${PROJECT_NAME}_pid_control
-  /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/canbus/proto/libcanbus_proto_lib.a
-  /apollo/bazel-apollo/bazel-out/local-dbg/bin/modules/control/proto/libcontrol_proto_lib.a
-  canbus_proto_lib
-  protobuf
-  canbus_lib
-  control_lib
-  canbus_common
-  vehicle_signal_proto_lib
-  pnc_point_proto_lib
-  gnss_status_proto_lib
-  car_sound_proto_lib
-  header_proto_lib
-  common_proto_lib
-  error_code_proto_lib
-  vehicle_state_proto_lib 
-)
-
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)
+  set(ament_cmake_copyright_FOUND TRUE)
+  set(ament_cmake_cpplint_FOUND TRUE)
+  ament_lint_auto_find_test_dependencies()
 endif()
 
-#############
-## Testing ##
-#############
-
-if(CATKIN_ENABLE_TESTING)
-
-  find_package(rostest REQUIRED)
-
-  add_subdirectory(test/rapidcheck)
-
-  add_library(
-    oscc_fixture
-    test/oscc_fixture.c
-  )
-
-
-  target_include_directories(
-    oscc_fixture PUBLIC
-    test/include
-    oscc/api/include/can_protocols
-  )
-
-  add_rostest_gtest(
-    test_ros_oscc_api
-    test/test_ros_to_oscc.launch
-    test/test_ros_to_oscc.cpp
-  )
-
-  target_include_directories(
-    test_ros_oscc_api PUBLIC
-    test/include
-    test/rapidcheck/include
-    test/rapidcheck/extras/gtest/include
-  )
-
-  target_link_libraries(
-    test_ros_oscc_api
-    rapidcheck
-    ${PROJECT_NAME}_ros_to_oscc
-    oscc_fixture
-    ${catkin_LIBRARIES}
-  )
-
-  add_rostest_gtest(
-    test_oscc_ros_api
-    test/test_oscc_to_ros.launch
-    test/test_oscc_to_ros.cpp
-  )
-
-  target_include_directories(
-    test_oscc_ros_api PUBLIC
-    include
-    test/include
-    test/rapidcheck/include
-    test/rapidcheck/extras/gtest/include
-    oscc/api/include/can_protocols
-  )
-
-  target_link_libraries(
-    test_oscc_ros_api
-    rapidcheck
-    ${PROJECT_NAME}_oscc_to_ros
-    oscc_fixture
-    ${catkin_LIBRARIES}
-  )
-
-endif()
-
-#############
-## Install ##
-#############
-
-install(
-  TARGETS
-  oscc_api
-  ${PROJECT_NAME}_node
-  ${PROJECT_NAME}_oscc_to_ros
-  ${PROJECT_NAME}_ros_to_oscc
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
-
-install(
-  DIRECTORY
-  include/${PROJECT_NAME}
-  oscc/api/include
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-  FILES_MATCHING PATTERN "*.h"
-)
+ament_export_include_directories(include)
+ament_export_libraries(roscco_bridge oscc_api)
+ament_export_dependencies(rclcpp std_msgs rosidl_default_runtime)
+ament_package()

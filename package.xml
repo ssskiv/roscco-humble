@@ -1,42 +1,34 @@
 <?xml version="1.0"?>
-<package>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
   <name>roscco</name>
-  <version>1.0.0</version>
-  <description>An OSCC to ROS interface</description>
+  <version>2.0.0</version>
+  <description>An OSCC to ROS 2 interface (port of PolySync/roscco to ROS 2 Humble)</description>
 
-  <!-- One maintainer tag required, multiple allowed, one person per tag -->
-  <maintainer email="support@polysync.io">PolySync</maintainer>
-
-
-  <!-- One license tag required, multiple allowed, one license per tag -->
+  <maintainer email="you@example.com">Maintainer</maintainer>
   <license>MIT</license>
 
-
-  <!-- Url tags are optional, but multiple are allowed, one per tag -->
-  <!-- Optional attribute type can be: website, bugtracker, or repository -->
-  <url type="github">https://github.com/PolySync/roscco/</url>
-
-
-  <!-- Author tags are optional, multiple are allowed, one per tag -->
-  <!-- Authors do not have to be maintainers, but could be -->
+  <url type="repository">https://github.com/PolySync/roscco/</url>
   <author email="rbrown@polysync.io">Robert Brown</author>
 
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
-  <!-- The *_depend tags are used to specify dependencies -->
-  <!-- Dependencies can be catkin packages or system dependencies -->
-  <buildtool_depend>catkin</buildtool_depend>
-  <build_depend>message_generation</build_depend>
-  <build_depend>roscpp</build_depend>
-  <build_depend>std_msgs</build_depend>
-  <test_depend>rostest</test_depend>
-  <run_depend>message_runtime</run_depend>
-  <run_depend>roscpp</run_depend>
-  <run_depend>std_msgs</run_depend>
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>sensor_msgs</depend>
 
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>joy</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
 
-  <!-- The export tag contains other, unspecified, tags -->
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
   <export>
-    <!-- Other tools can request additional information be placed here -->
-
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

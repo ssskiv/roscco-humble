@@ -1,214 +1,222 @@
-#include <geometry_msgs/Accel.h>
-#include <ros/ros.h>
-#include <roscco/BrakeCommand.h>
-#include <roscco/EnableDisable.h>
-#include <roscco/SteeringCommand.h>
-#include <roscco/ThrottleCommand.h>
-#include <sensor_msgs/Joy.h>
+#include <algorithm>
+#include <chrono>
+#include <functional>
+#include <memory>
 
-double calc_exponential_average(double AVERAGE, double SETPOINT, double FACTOR);
-double linear_tranformation(double VALUE, double HIGH_1, double LOW_1, double HIGH_2, double LOW_2);
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joy.hpp>
 
-class RosccoTeleop
+#include "roscco/msg/brake_command.hpp"
+#include "roscco/msg/enable_disable.hpp"
+#include "roscco/msg/steering_command.hpp"
+#include "roscco/msg/throttle_command.hpp"
+
+namespace
+{
+
+double exponentialAverage(double average, double setpoint, double factor)
+{
+  return (setpoint * factor) + ((1.0 - factor) * average);
+}
+
+double linearTransform(double value, double high_1, double low_1, double high_2, double low_2)
+{
+  return low_2 + (value - low_1) * (high_2 - low_2) / (high_1 - low_1);
+}
+
+}  // namespace
+
+/**
+ * @brief Gamepad teleop for ROSCCO.
+ *
+ * Differs from the ROS 1 example in two ways that matter on a real vehicle:
+ *
+ *  1. Commands are published from a fixed 50 Hz timer, not from the joy
+ *     callback. The OSCC modules fault out if they go 200 ms without a
+ *     command, and joy_node's rate is not guaranteed.
+ *  2. A watchdog zeroes the commands and sends a disable if joy messages stop
+ *     arriving. Unplugging the gamepad used to leave the last command latched
+ *     until the firmware timeout fired.
+ *
+ * Axis and button indices are parameters rather than constants -- the defaults
+ * match a Logitech F310 / wired Xbox pad in XInput mode.
+ */
+class RosccoTeleop : public rclcpp::Node
 {
 public:
-  RosccoTeleop();
+  RosccoTeleop()
+  : Node("roscco_teleop")
+  {
+    brake_axis_ = declare_parameter<int>("brake_axis", 2);
+    throttle_axis_ = declare_parameter<int>("throttle_axis", 5);
+    steering_axis_ = declare_parameter<int>("steering_axis", 0);
+    start_button_ = declare_parameter<int>("start_button", 7);
+    back_button_ = declare_parameter<int>("back_button", 6);
+
+    smoothing_factor_ = declare_parameter<double>("steering_smoothing_factor", 0.1);
+    publish_rate_hz_ = declare_parameter<double>("publish_rate_hz", 50.0);
+    joy_timeout_s_ = declare_parameter<double>("joy_timeout", 0.3);
+
+    const rclcpp::QoS qos(10);
+
+    brake_pub_ = create_publisher<roscco::msg::BrakeCommand>("brake_command", qos);
+    throttle_pub_ = create_publisher<roscco::msg::ThrottleCommand>("throttle_command", qos);
+    steering_pub_ = create_publisher<roscco::msg::SteeringCommand>("steering_command", qos);
+    enable_disable_pub_ = create_publisher<roscco::msg::EnableDisable>("enable_disable", qos);
+
+    joy_sub_ = create_subscription<sensor_msgs::msg::Joy>(
+      "joy", qos, std::bind(&RosccoTeleop::joyCallback, this, std::placeholders::_1));
+
+    const auto period = std::chrono::duration<double>(1.0 / publish_rate_hz_);
+    timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(period),
+      std::bind(&RosccoTeleop::publishCommands, this));
+
+    RCLCPP_INFO(get_logger(), "Pull both triggers fully to arm, then press START to enable.");
+  }
 
 private:
-  void joystickCallback(const sensor_msgs::Joy::ConstPtr& joy);
+  void joyCallback(const sensor_msgs::msg::Joy::SharedPtr joy)
+  {
+    const int max_axis = std::max({brake_axis_, throttle_axis_, steering_axis_});
+    const int max_button = std::max(start_button_, back_button_);
 
-  ros::NodeHandle nh_;
+    if (static_cast<int>(joy->axes.size()) <= max_axis ||
+      static_cast<int>(joy->buttons.size()) <= max_button)
+    {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Joy message has %zu axes / %zu buttons -- not enough for the configured indices. "
+        "Is the F310 switch on 'X' rather than 'D'?",
+        joy->axes.size(), joy->buttons.size());
+      return;
+    }
 
-  ros::Publisher throttle_pub_;
-  ros::Publisher brake_pub_;
-  ros::Publisher steering_pub_;
-  ros::Publisher enable_disable_pub_;
-  ros::Subscriber joy_sub_;
+    last_joy_ = now();
 
-  int previous_start_state_ = 0;
-  int previous_back_state_ = 0;
+    // Triggers report 0.0 until they are first moved, which reads as 50%.
+    // Require both to be pulled to the parked end before accepting input.
+    if (!armed_) {
+      if (joy->axes[brake_axis_] > kParkedThreshold &&
+        joy->axes[throttle_axis_] > kParkedThreshold)
+      {
+        armed_ = true;
+        RCLCPP_INFO(get_logger(), "Triggers armed.");
+      } else {
+        if (joy->axes[brake_axis_] <= kParkedThreshold) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Pull the brake trigger.");
+        }
+        if (joy->axes[throttle_axis_] <= kParkedThreshold) {
+          RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000, "Pull the throttle trigger.");
+        }
+      }
+      return;
+    }
 
-  // Number of messages to retain when the message queue is full
-  const int QUEUE_SIZE_ = 10;
+    // Triggers: [1, -1] -> [0, 1]. Steering stick: [1, -1] -> [-1, 1].
+    brake_ = linearTransform(joy->axes[brake_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
+    throttle_ = linearTransform(joy->axes[throttle_axis_], kTriggerMax, kTriggerMin, 1.0, 0.0);
+    steering_ = linearTransform(joy->axes[steering_axis_], kStickMax, kStickMin, 1.0, -1.0);
 
-  // Timed callback frequency set to OSCC recommended publishing rate of 20 Hz (50 ms == 0.05 s)
-  const float CALLBACK_FREQ_ = 0.05;  // Units in Seconds
+    if (previous_back_ == 0 && joy->buttons[back_button_]) {
+      setEnabled(false);
+    } else if (previous_start_ == 0 && joy->buttons[start_button_]) {
+      setEnabled(true);
+    }
 
-  // OSCC input range
-  const double BRAKE_MAX_ = 1;
-  const double BRAKE_MIN_ = 0;
-  const double THROTTLE_MAX_ = 1;
-  const double THROTTLE_MIN_ = 0;
-  const double STEERING_MAX_ = 1;
-  const double STEERING_MIN_ = -1;
+    previous_back_ = joy->buttons[back_button_];
+    previous_start_ = joy->buttons[start_button_];
+  }
 
-  // Store last known value for timed callback
-  double brake_ = 0.0;
-  double throttle_ = 0.0;
-  double steering_ = 0.0;
-  bool enabled_ = false;
+  void setEnabled(bool enable)
+  {
+    roscco::msg::EnableDisable message;
+    message.header.stamp = now();
+    message.enable_control = enable;
+    enable_disable_pub_->publish(message);
+    enabled_ = enable;
 
-  // Smooth the steering to remove twitchy joystick movements
-  const double DATA_SMOOTHING_FACTOR_ = 0.1;
-  double steering_average_ = 0.0;
+    RCLCPP_INFO(get_logger(), "Control %s", enable ? "ENABLED" : "disabled");
+  }
 
-  // Variable to ensure joystick triggers have been initialized
-  bool initialized_ = false;
+  void publishCommands()
+  {
+    // Watchdog: joy_node died, gamepad unplugged, or the topic went quiet.
+    if (enabled_ && last_joy_.nanoseconds() > 0 &&
+      (now() - last_joy_).seconds() > joy_timeout_s_)
+    {
+      RCLCPP_ERROR(get_logger(), "Joy input timed out -- zeroing commands and disabling.");
+      brake_ = 0.0;
+      throttle_ = 0.0;
+      steering_ = 0.0;
+      steering_average_ = 0.0;
+      armed_ = false;
+      setEnabled(false);
+    }
 
-  // The threshold for considering the controller triggers to be parked in the correct position
-  const double PARKED_THRESHOLD_ = 0.99;
+    if (!enabled_) {
+      return;
+    }
 
-  const int BRAKE_AXES_ = 2;
-  const int THROTTLE_AXES_ = 5;
-  const int STEERING_AXES_ = 0;
-  const int START_BUTTON_ = 7;
-  const int BACK_BUTTON_ = 6;
+    const auto stamp = now();
 
-  const double TRIGGER_MIN_ = 1;
-  const double TRIGGER_MAX_ = -1;
-  const double JOYSTICK_MIN_ = 1;
-  const double JOYSTICK_MAX_ = -1;
+    roscco::msg::BrakeCommand brake_message;
+    brake_message.header.stamp = stamp;
+    brake_message.brake_position = brake_;
+    brake_pub_->publish(brake_message);
+
+    roscco::msg::ThrottleCommand throttle_message;
+    throttle_message.header.stamp = stamp;
+    throttle_message.throttle_position = throttle_;
+    throttle_pub_->publish(throttle_message);
+
+    steering_average_ = exponentialAverage(steering_average_, steering_, smoothing_factor_);
+
+    roscco::msg::SteeringCommand steering_message;
+    steering_message.header.stamp = stamp;
+    steering_message.steering_torque = steering_average_;
+    steering_pub_->publish(steering_message);
+  }
+
+  static constexpr double kParkedThreshold = 0.99;
+  static constexpr double kTriggerMin = 1.0;
+  static constexpr double kTriggerMax = -1.0;
+  static constexpr double kStickMin = 1.0;
+  static constexpr double kStickMax = -1.0;
+
+  rclcpp::Publisher<roscco::msg::BrakeCommand>::SharedPtr brake_pub_;
+  rclcpp::Publisher<roscco::msg::ThrottleCommand>::SharedPtr throttle_pub_;
+  rclcpp::Publisher<roscco::msg::SteeringCommand>::SharedPtr steering_pub_;
+  rclcpp::Publisher<roscco::msg::EnableDisable>::SharedPtr enable_disable_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+
+  int brake_axis_{2};
+  int throttle_axis_{5};
+  int steering_axis_{0};
+  int start_button_{7};
+  int back_button_{6};
+
+  double smoothing_factor_{0.1};
+  double publish_rate_hz_{50.0};
+  double joy_timeout_s_{0.3};
+
+  double brake_{0.0};
+  double throttle_{0.0};
+  double steering_{0.0};
+  double steering_average_{0.0};
+
+  bool armed_{false};
+  bool enabled_{false};
+  int previous_start_{0};
+  int previous_back_{0};
+  rclcpp::Time last_joy_{0, 0, RCL_ROS_TIME};
 };
 
-/**
- * @brief ROSCCOTeleop class initializer
- *
- * This function constructs a class which subscribes to ROS Joystick messages, converts the inputs to ROSCCO relevant
- * values and publishes ROSCCO messages on a 20 Hz cadence.
- */
-RosccoTeleop::RosccoTeleop()
+int main(int argc, char ** argv)
 {
-  brake_pub_ = nh_.advertise<roscco::BrakeCommand>("brake_command", QUEUE_SIZE_);
-  throttle_pub_ = nh_.advertise<roscco::ThrottleCommand>("throttle_command", QUEUE_SIZE_);
-  steering_pub_ = nh_.advertise<roscco::SteeringCommand>("steering_command", QUEUE_SIZE_);
-  enable_disable_pub_ = nh_.advertise<roscco::EnableDisable>("enable_disable", QUEUE_SIZE_);
-
-  joy_sub_ = nh_.subscribe<sensor_msgs::Joy>("joy", QUEUE_SIZE_, &RosccoTeleop::joystickCallback, this);
-}
-
-/**
- * @brief Callback function consume a joystick message and map values to ROSCCO ranges
- *
- * This function consumes a joystick message and maps the joystick inputs to ROSCCO ranges which are stored to private
- * class variables. Since the Joystick messages are published before all buttons are initialized this function also
- * validates that the button ranges are valid before consuming the date.
- *
- * @param joy The ROS Joystick message to be consumed.
- */
-void RosccoTeleop::joystickCallback(const sensor_msgs::Joy::ConstPtr& joy)
-{
-  // gamepad triggers default 0 prior to using them which is 50% for the logitech and xbox controller the initilization
-  // is to ensure the triggers have been pulled prior to enabling OSCC command
-  if (initialized_)
-  {
-    // Map the trigger values [1, -1] to oscc values [0, 1]
-    brake_ = linear_tranformation(joy->axes[BRAKE_AXES_], TRIGGER_MAX_, TRIGGER_MIN_, BRAKE_MAX_, BRAKE_MIN_);
-    throttle_ =
-        linear_tranformation(joy->axes[THROTTLE_AXES_], TRIGGER_MAX_, TRIGGER_MIN_, THROTTLE_MAX_, THROTTLE_MIN_);
-
-    // Map the joystick to steering [1, -1] to oscc values [-1, 1]
-    steering_ =
-        linear_tranformation(joy->axes[STEERING_AXES_], JOYSTICK_MAX_, JOYSTICK_MIN_, STEERING_MAX_, STEERING_MIN_);
-
-    roscco::EnableDisable enable_msg;
-    enable_msg.header.stamp = ros::Time::now();
-
-    if ((previous_back_state_ == 0) && joy->buttons[BACK_BUTTON_])
-    {
-      enable_msg.enable_control = false;
-      enable_disable_pub_.publish(enable_msg);
-      enabled_ = false;
-    }
-    else if ((previous_start_state_ == 0) && joy->buttons[START_BUTTON_])
-    {
-      enable_msg.enable_control = true;
-      enable_disable_pub_.publish(enable_msg);
-      enabled_ = true;
-    }
-
-    previous_back_state_ = joy->buttons[BACK_BUTTON_];
-    previous_start_state_ = joy->buttons[START_BUTTON_];
-
-    if (enabled_)
-    {
-      roscco::BrakeCommand brake_msg;
-      brake_msg.header.stamp = ros::Time::now();
-      brake_msg.brake_position = brake_;
-      brake_pub_.publish(brake_msg);
-
-      roscco::ThrottleCommand throttle_msg;
-      throttle_msg.header.stamp = ros::Time::now();
-      throttle_msg.throttle_position = throttle_;
-      throttle_pub_.publish(throttle_msg);
-
-      // Utilize exponential average similar to OSCC's joystick commander for smoothing of joystick twitchy output
-      steering_average_ = calc_exponential_average(steering_average_, steering_, DATA_SMOOTHING_FACTOR_);
-
-      roscco::SteeringCommand steering_msg;
-      steering_msg.header.stamp = ros::Time::now();
-      steering_msg.steering_torque = steering_average_;
-      steering_pub_.publish(steering_msg);
-    }
-  }
-  else
-  {
-    // Ensure the trigger values have been initialized
-    if ((joy->axes[BRAKE_AXES_] > PARKED_THRESHOLD_) && (joy->axes[THROTTLE_AXES_] > PARKED_THRESHOLD_))
-    {
-      initialized_ = true;
-    }
-
-    if (joy->axes[BRAKE_AXES_] <= PARKED_THRESHOLD_)
-    {
-      ROS_INFO("Pull the brake trigger to initialize.");
-    }
-
-    if (joy->axes[THROTTLE_AXES_] <= PARKED_THRESHOLD_)
-    {
-      ROS_INFO("Pull the throttle trigger to initilize.");
-    }
-  }
-}
-
-/**
- * @brief Calculate the exponential average
- *
- * Calculates and returns a new exponential moving average (EMA) based on the new values.
- *
- * @param  AVERAGE  The current average value.
- * @param  SETPOINT The new datapoint to be included in the average.
- * @param  FACTOR   The coeffecient for smoothing rate, higher number yields faster discount of older values.
- * @return          The new exponential average value the includes the new setpoint.
- */
-double calc_exponential_average(const double AVERAGE, const double SETPOINT, const double FACTOR)
-{
-  double exponential_average = (SETPOINT * FACTOR) + ((1.0 - FACTOR) * AVERAGE);
-
-  return (exponential_average);
-}
-
-/**
- * @brief Remaps values from one linear range to another.
- *
- * Remap the value in an existing linear range to an new linear range example 0 in [-1, 1] to [0, 1] results in 0.5
- *
- * @param  VALUE  Data value to be remapped.
- * @param  HIGH_1 High value of the old range
- * @param  LOW_1  Low value of the old range
- * @param  HIGH_2 High value of the new range
- * @param  LOW_2  Low value of the new range
- * @return        Data value mapped to the new range
- */
-double linear_tranformation(const double VALUE, const double HIGH_1, const double LOW_1, const double HIGH_2,
-                            const double LOW_2)
-{
-  return LOW_2 + (VALUE - LOW_1) * (HIGH_2 - LOW_2) / (HIGH_1 - LOW_1);
-}
-
-int main(int argc, char** argv)
-{
-  ros::init(argc, argv, "roscco_teleop");
-  RosccoTeleop roscco_teleop;
-
-  ros::spin();
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<RosccoTeleop>());
+  rclcpp::shutdown();
+  return 0;
 }

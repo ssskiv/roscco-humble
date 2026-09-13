@@ -1,51 +1,56 @@
-#include <string>
+#include <memory>
 
 extern "C" {
 #include <oscc.h>
 }
 
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 
-#include <roscco/oscc_to_ros.h>
-#include <roscco/ros_to_oscc.h>
+#include "roscco/oscc_to_ros.hpp"
+#include "roscco/ros_to_oscc.hpp"
 
-int main(int argc, char* argv[])
+int main(int argc, char * argv[])
 {
-  ros::init(argc, argv, "roscco_node");
+  rclcpp::init(argc, argv);
 
-  ros::NodeHandle public_nh;
-  ros::NodeHandle private_nh("~");
+  auto node = std::make_shared<rclcpp::Node>("roscco_node");
 
-  int can_channel;
-  private_nh.param<int>("can_channel", can_channel, 0);
+  const int can_channel = node->declare_parameter<int>("can_channel", 0);
+  const int drain_period_ms = node->declare_parameter<int>("drain_period_ms", 5);
 
-  oscc_result_t ret = OSCC_ERROR;
-
-  ret = oscc_init();
-
-  if (ret != OSCC_OK)
-  {
-    ROS_ERROR("Could not initialize OSCC");
+  // NOTE: older OSCC API revisions expose oscc_init() with no arguments
+  // instead of oscc_open(channel). If your checkout of the oscc submodule
+  // predates the channel argument, swap the line below for oscc_init().
+  if (oscc_open(static_cast<unsigned int>(can_channel)) != OSCC_OK) {
+    RCLCPP_FATAL(
+      node->get_logger(),
+      "Could not open OSCC on can%d. Is the interface up? "
+      "(sudo ip link set can%d up type can bitrate 500000)",
+      can_channel, can_channel);
+    rclcpp::shutdown();
+    return 1;
   }
 
-  RosToOscc subcriber(&public_nh, &private_nh);
-  OsccToRos publisher(&public_nh, &private_nh);
+  RCLCPP_INFO(node->get_logger(), "OSCC opened on can%d", can_channel);
 
-  ros::spin();
+  // Order matters: start publishing reports before accepting commands.
+  auto publisher = std::make_unique<roscco::OsccToRos>(node.get(), drain_period_ms);
+  auto subscriber = std::make_unique<roscco::RosToOscc>(node.get());
 
-  ret = oscc_disable();
+  rclcpp::spin(node);
 
-  if (ret != OSCC_OK)
-  {
-    ROS_ERROR("Could not disable OSCC");
+  // Reached on SIGINT. Disable first so the modules stop actuating, then close.
+  if (oscc_disable() != OSCC_OK) {
+    RCLCPP_ERROR(node->get_logger(), "Could not disable OSCC");
   }
 
-  ret = oscc_close(can_channel);
+  publisher.reset();
+  subscriber.reset();
 
-  if (ret != OSCC_OK)
-  {
-    ROS_ERROR("Could not close OSCC connection");
+  if (oscc_close(static_cast<unsigned int>(can_channel)) != OSCC_OK) {
+    RCLCPP_ERROR(node->get_logger(), "Could not close OSCC connection");
   }
 
-  ros::waitForShutdown();
+  rclcpp::shutdown();
+  return 0;
 }
